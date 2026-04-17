@@ -10,37 +10,66 @@ META_API_VERSION = "v25.0"
 JST = ZoneInfo("Asia/Tokyo")
 DEFAULT_WORKSHEET_NAME = "gitreport"
 
-# Metaのみ使う
-ENABLE_META = True
-
 
 def main():
     print("=== Start Meta Export ===")
+
     config = load_secret()
     mask_sensitive_values(config)
 
     resolved = resolve_config(config)
     validate_config(resolved)
 
-    month_ranges = get_target_month_ranges(month_count=6)
-    oldest_since = month_ranges[0]["since"]
-    until = month_ranges[-1]["until"]
+    month_ranges, daily_since, daily_until = get_target_date_ranges()
+    print_month_ranges(month_ranges, daily_since, daily_until)
 
-    print(
-        "Target months: "
-        + ", ".join(
-            [f"{r['label']}({r['since']} to {r['until']})" for r in month_ranges]
-        )
-    )
+    rows = []
 
-    rows = fetch_meta_rows(
+    rows += fetch_campaign_monthly_rows(
         act_id=resolved["meta"]["account_id"],
         token=resolved["meta"]["token"],
         month_ranges=month_ranges,
-        daily_since=oldest_since,
-        daily_until=until,
     )
-    print(f"Meta rows built: {len(rows)}")
+    print(f"campaign rows: {len(rows)}")
+
+    ad_day_rows = fetch_ad_day_rows(
+        act_id=resolved["meta"]["account_id"],
+        token=resolved["meta"]["token"],
+        since=daily_since,
+        until=daily_until,
+    )
+    rows += ad_day_rows
+    print(f"ad_day rows: {len(ad_day_rows)}")
+
+    adset_gen_rows = fetch_adset_breakdown_rows(
+        act_id=resolved["meta"]["account_id"],
+        token=resolved["meta"]["token"],
+        month_ranges=month_ranges,
+        breakdown="gender",
+        scope_name="adset_gen",
+    )
+    rows += adset_gen_rows
+    print(f"adset_gen rows: {len(adset_gen_rows)}")
+
+    adset_age_rows = fetch_adset_breakdown_rows(
+        act_id=resolved["meta"]["account_id"],
+        token=resolved["meta"]["token"],
+        month_ranges=month_ranges,
+        breakdown="age",
+        scope_name="adset_age",
+    )
+    rows += adset_age_rows
+    print(f"adset_age rows: {len(adset_age_rows)}")
+
+    adset_pf_rows = fetch_adset_breakdown_rows(
+        act_id=resolved["meta"]["account_id"],
+        token=resolved["meta"]["token"],
+        month_ranges=month_ranges,
+        breakdown="publisher_platform",
+        scope_name="adset_pf",
+    )
+    rows += adset_pf_rows
+    print(f"adset_pf rows: {len(adset_pf_rows)}")
 
     rows = sort_rows(rows)
 
@@ -48,6 +77,7 @@ def main():
         sheet_id=resolved["sheet"]["spreadsheet_id"],
         google_creds_dict=resolved["sheet"]["google_service_account"],
     )
+
     write_to_sheet(
         spreadsheet=spreadsheet,
         sheet_name=resolved["sheet"]["worksheet_name"],
@@ -124,15 +154,11 @@ def resolve_config(config):
 
 def validate_config(resolved):
     required = {
+        "meta.token": resolved["meta"]["token"],
+        "meta.account_id": resolved["meta"]["account_id"],
         "sheet.spreadsheet_id": resolved["sheet"]["spreadsheet_id"],
         "sheet.google_service_account": resolved["sheet"]["google_service_account"],
     }
-
-    if ENABLE_META:
-        required.update({
-            "meta.token": resolved["meta"]["token"],
-            "meta.account_id": resolved["meta"]["account_id"],
-        })
 
     missing = [k for k, v in required.items() if not v]
     if missing:
@@ -161,276 +187,209 @@ def normalize_meta_act_id(raw_act_id):
     return f"act_{cleaned}"
 
 
-def get_target_month_ranges(month_count=6):
-    """
-    起動日の当月1日〜前日を当月とし、過去6か月分を返す
-    例: 2026-04-17起動 -> 2025-11, 2025-12, 2026-01, 2026-02, 2026-03, 2026-04(1日〜16日)
-    """
+def get_target_date_ranges():
     today_jst = datetime.now(JST).date()
     yesterday = today_jst - timedelta(days=1)
 
-    if yesterday.month == today_jst.month:
-        current_month_start = date(today_jst.year, today_jst.month, 1)
-    else:
-        current_month_start = date(yesterday.year, yesterday.month, 1)
+    if yesterday < date(today_jst.year, today_jst.month, 1):
+        raise RuntimeError("昨日が存在しないため、月初当日の実行では取得対象がありません。")
 
-    ranges = []
-    for i in range(month_count - 1, -1, -1):
-        month_start = shift_month_start(current_month_start, -i)
-        if month_start.year == yesterday.year and month_start.month == yesterday.month:
-            month_end = yesterday
-        else:
-            month_end = end_of_month(month_start)
+    current_month_start = date(today_jst.year, today_jst.month, 1)
 
-        ranges.append({
+    month_ranges = []
+
+    # 当月（1日〜前日）
+    month_ranges.append({
+        "label": current_month_start.strftime("%Y-%m"),
+        "since": current_month_start,
+        "until": yesterday,
+    })
+
+    # 過去5ヶ月分の月次
+    cursor = current_month_start - timedelta(days=1)
+    for _ in range(5):
+        month_start = date(cursor.year, cursor.month, 1)
+        month_end = date(
+            cursor.year + (1 if cursor.month == 12 else 0),
+            1 if cursor.month == 12 else cursor.month + 1,
+            1
+        ) - timedelta(days=1)
+
+        month_ranges.append({
             "label": month_start.strftime("%Y-%m"),
             "since": month_start,
             "until": month_end,
         })
 
-    return ranges
+        cursor = month_start - timedelta(days=1)
+
+    # 昇順に並べたいなら reverse、今回は sort 用にそのままでも可
+    month_ranges = sorted(month_ranges, key=lambda x: x["since"])
+
+    daily_since = month_ranges[0]["since"]
+    daily_until = yesterday
+
+    return month_ranges, daily_since, daily_until
 
 
-def shift_month_start(base_month_start, month_delta):
-    y = base_month_start.year
-    m = base_month_start.month + month_delta
-
-    while m <= 0:
-        y -= 1
-        m += 12
-    while m > 12:
-        y += 1
-        m -= 12
-
-    return date(y, m, 1)
-
-
-def end_of_month(d):
-    if d.month == 12:
-        return date(d.year, 12, 31)
-    return date(d.year, d.month + 1, 1) - timedelta(days=1)
-
-
-def make_output_row(
-    media="meta",
-    scope="",
-    month="",
-    day="",
-    campaign_name="",
-    adset_name="",
-    ad_name="",
-    gender="",
-    age="",
-    platform="",
-    impressions=0,
-    link_clicks=0,
-    amount_spent=0,
-    instagram_profile_visits=0,
-    instagram_follows=0,
-):
-    return [
-        media,
-        scope,
-        month,
-        day,
-        campaign_name or "",
-        adset_name or "",
-        ad_name or "",
-        gender or "",
-        age or "",
-        platform or "",
-        to_int(impressions),
-        to_int(link_clicks),
-        to_float(amount_spent) * 1.25,
-        to_int(instagram_profile_visits),
-        to_int(instagram_follows),
-    ]
-
-
-def fetch_meta_rows(act_id, token, month_ranges, daily_since, daily_until):
-    normalized_act_id = normalize_meta_act_id(act_id)
-    rows = []
-
-    common_fields = [
-        "campaign_name",
-        "adset_name",
-        "impressions",
-        "inline_link_clicks",
-        "spend",
-        "instagram_profile_visits",
-        "follows",
-    ]
-
-    ad_day_fields = [
-        "campaign_name",
-        "adset_name",
-        "ad_name",
-        "impressions",
-        "inline_link_clicks",
-        "spend",
-        "instagram_profile_visits",
-        "follows",
-    ]
-
-    # campaign：キャンペーン別×月別
-    for month_range in month_ranges:
-        batch = fetch_meta_insights(
-            act_id=normalized_act_id,
-            token=token,
-            since=month_range["since"],
-            until=month_range["until"],
-            time_increment="monthly",
-            level="campaign",
-            fields=common_fields,
-        )
-        for item in batch:
-            rows.append(
-                make_output_row(
-                    media="meta",
-                    scope="campaign",
-                    month=month_range["label"],
-                    day="",
-                    campaign_name=item.get("campaign_name", ""),
-                    impressions=item.get("impressions"),
-                    link_clicks=item.get("inline_link_clicks"),
-                    amount_spent=item.get("spend"),
-                    instagram_profile_visits=item.get("instagram_profile_visits"),
-                    instagram_follows=item.get("follows"),
-                )
-            )
-
-    # ad_day：広告別×日別
-    batch = fetch_meta_insights(
-        act_id=normalized_act_id,
-        token=token,
-        since=daily_since,
-        until=daily_until,
-        time_increment="1",
-        level="ad",
-        fields=ad_day_fields,
+def print_month_ranges(month_ranges, daily_since, daily_until):
+    text = ", ".join(
+        [f"{r['label']}({r['since']} to {r['until']})" for r in month_ranges]
     )
-    for item in batch:
-        rows.append(
-            make_output_row(
+    print(f"Target monthly ranges: {text}")
+    print(f"Target daily range: {daily_since} to {daily_until}")
+
+
+def fetch_campaign_monthly_rows(act_id, token, month_ranges):
+    rows = []
+    normalized_act_id = normalize_meta_act_id(act_id)
+
+    for month_range in month_ranges:
+        items = fetch_meta_insights(
+            act_id=normalized_act_id,
+            token=token,
+            since=month_range["since"],
+            until=month_range["until"],
+            level="campaign",
+            fields=[
+                "campaign_name",
+                "impressions",
+                "inline_link_clicks",
+                "spend",
+                "actions",
+            ],
+            time_increment="monthly",
+        )
+
+        for item in items:
+            metrics = extract_common_metrics(item)
+            rows.append(make_output_row(
                 media="meta",
-                scope="ad_day",
-                month=to_month(item.get("date_start")),
-                day=item.get("date_start", ""),
+                scope="campaign",
+                month=month_range["label"],
+                day="",
                 campaign_name=item.get("campaign_name", ""),
-                adset_name=item.get("adset_name", ""),
-                ad_name=item.get("ad_name", ""),
-                impressions=item.get("impressions"),
-                link_clicks=item.get("inline_link_clicks"),
-                amount_spent=item.get("spend"),
-                instagram_profile_visits=item.get("instagram_profile_visits"),
-                instagram_follows=item.get("follows"),
-            )
-        )
-
-    # adset_gen：広告セット別×性別
-    for month_range in month_ranges:
-        batch = fetch_meta_insights(
-            act_id=normalized_act_id,
-            token=token,
-            since=month_range["since"],
-            until=month_range["until"],
-            time_increment="monthly",
-            level="adset",
-            fields=common_fields,
-            breakdowns=["gender"],
-        )
-        for item in batch:
-            rows.append(
-                make_output_row(
-                    media="meta",
-                    scope="adset_gen",
-                    month=month_range["label"],
-                    day="",
-                    campaign_name=item.get("campaign_name", ""),
-                    adset_name=item.get("adset_name", ""),
-                    gender=item.get("gender", ""),
-                    impressions=item.get("impressions"),
-                    link_clicks=item.get("inline_link_clicks"),
-                    amount_spent=item.get("spend"),
-                    instagram_profile_visits=item.get("instagram_profile_visits"),
-                    instagram_follows=item.get("follows"),
-                )
-            )
-
-    # adset_age：広告セット別×年齢別
-    for month_range in month_ranges:
-        batch = fetch_meta_insights(
-            act_id=normalized_act_id,
-            token=token,
-            since=month_range["since"],
-            until=month_range["until"],
-            time_increment="monthly",
-            level="adset",
-            fields=common_fields,
-            breakdowns=["age"],
-        )
-        for item in batch:
-            rows.append(
-                make_output_row(
-                    media="meta",
-                    scope="adset_age",
-                    month=month_range["label"],
-                    day="",
-                    campaign_name=item.get("campaign_name", ""),
-                    adset_name=item.get("adset_name", ""),
-                    age=item.get("age", ""),
-                    impressions=item.get("impressions"),
-                    link_clicks=item.get("inline_link_clicks"),
-                    amount_spent=item.get("spend"),
-                    instagram_profile_visits=item.get("instagram_profile_visits"),
-                    instagram_follows=item.get("follows"),
-                )
-            )
-
-    # adset_pf：広告セット別×プラットフォーム別
-    for month_range in month_ranges:
-        batch = fetch_meta_insights(
-            act_id=normalized_act_id,
-            token=token,
-            since=month_range["since"],
-            until=month_range["until"],
-            time_increment="monthly",
-            level="adset",
-            fields=common_fields,
-            breakdowns=["publisher_platform"],
-        )
-        for item in batch:
-            rows.append(
-                make_output_row(
-                    media="meta",
-                    scope="adset_pf",
-                    month=month_range["label"],
-                    day="",
-                    campaign_name=item.get("campaign_name", ""),
-                    adset_name=item.get("adset_name", ""),
-                    platform=item.get("publisher_platform", ""),
-                    impressions=item.get("impressions"),
-                    link_clicks=item.get("inline_link_clicks"),
-                    amount_spent=item.get("spend"),
-                    instagram_profile_visits=item.get("instagram_profile_visits"),
-                    instagram_follows=item.get("follows"),
-                )
-            )
+                adset_name="",
+                ad_name="",
+                gender="",
+                age="",
+                publisher_platform="",
+                impressions=metrics["impressions"],
+                link_clicks=metrics["link_clicks"],
+                amount_spent=metrics["amount_spent"],
+                instagram_profile_visits=metrics["instagram_profile_visits"],
+                instagram_follows=metrics["instagram_follows"],
+            ))
 
     return rows
 
 
-def fetch_meta_insights(act_id, token, since, until, time_increment, level, fields, breakdowns=None):
+def fetch_ad_day_rows(act_id, token, since, until):
+    rows = []
+    normalized_act_id = normalize_meta_act_id(act_id)
+
+    items = fetch_meta_insights(
+        act_id=normalized_act_id,
+        token=token,
+        since=since,
+        until=until,
+        level="ad",
+        fields=[
+            "campaign_name",
+            "adset_name",
+            "ad_name",
+            "impressions",
+            "inline_link_clicks",
+            "spend",
+            "actions",
+        ],
+        time_increment="1",
+    )
+
+    for item in items:
+        day = item.get("date_start", "")
+        rows.append(make_output_row(
+            media="meta",
+            scope="ad_day",
+            month=to_month(day),
+            day=day,
+            campaign_name=item.get("campaign_name", ""),
+            adset_name=item.get("adset_name", ""),
+            ad_name=item.get("ad_name", ""),
+            gender="",
+            age="",
+            publisher_platform="",
+            impressions=extract_common_metrics(item)["impressions"],
+            link_clicks=extract_common_metrics(item)["link_clicks"],
+            amount_spent=extract_common_metrics(item)["amount_spent"],
+            instagram_profile_visits=extract_common_metrics(item)["instagram_profile_visits"],
+            instagram_follows=extract_common_metrics(item)["instagram_follows"],
+        ))
+
+    return rows
+
+
+def fetch_adset_breakdown_rows(act_id, token, month_ranges, breakdown, scope_name):
+    rows = []
+    normalized_act_id = normalize_meta_act_id(act_id)
+
+    for month_range in month_ranges:
+        items = fetch_meta_insights(
+            act_id=normalized_act_id,
+            token=token,
+            since=month_range["since"],
+            until=month_range["until"],
+            level="adset",
+            fields=[
+                "campaign_name",
+                "adset_name",
+                "impressions",
+                "inline_link_clicks",
+                "spend",
+                "actions",
+            ],
+            time_increment="monthly",
+            breakdowns=[breakdown],
+        )
+
+        for item in items:
+            metrics = extract_common_metrics(item)
+
+            gender = item.get("gender", "") if breakdown == "gender" else ""
+            age = item.get("age", "") if breakdown == "age" else ""
+            publisher_platform = item.get("publisher_platform", "") if breakdown == "publisher_platform" else ""
+
+            rows.append(make_output_row(
+                media="meta",
+                scope=scope_name,
+                month=month_range["label"],
+                day="",
+                campaign_name=item.get("campaign_name", ""),
+                adset_name=item.get("adset_name", ""),
+                ad_name="",
+                gender=gender,
+                age=age,
+                publisher_platform=publisher_platform,
+                impressions=metrics["impressions"],
+                link_clicks=metrics["link_clicks"],
+                amount_spent=metrics["amount_spent"],
+                instagram_profile_visits=metrics["instagram_profile_visits"],
+                instagram_follows=metrics["instagram_follows"],
+            ))
+
+    return rows
+
+
+def fetch_meta_insights(act_id, token, since, until, level, fields, time_increment, breakdowns=None):
     url = f"https://graph.facebook.com/{META_API_VERSION}/{act_id}/insights"
+
     params = {
         "access_token": token,
         "level": level,
-        "time_range": json.dumps(
-            {
-                "since": since.strftime("%Y-%m-%d"),
-                "until": until.strftime("%Y-%m-%d"),
-            }
-        ),
+        "time_range": json.dumps({
+            "since": since.strftime("%Y-%m-%d"),
+            "until": until.strftime("%Y-%m-%d"),
+        }),
         "fields": ",".join(fields),
         "time_increment": time_increment,
         "limit": 5000,
@@ -442,7 +401,8 @@ def fetch_meta_insights(act_id, token, since, until, time_increment, level, fiel
     all_rows = []
 
     while True:
-        response = requests.get(url, params=params, timeout=120)
+        response = requests.get(url, params=params, timeout=180)
+
         try:
             response.raise_for_status()
         except requests.HTTPError as e:
@@ -450,16 +410,17 @@ def fetch_meta_insights(act_id, token, since, until, time_increment, level, fiel
                 f"Meta API request failed. status={response.status_code}, body={truncate_text(response.text)}"
             ) from e
 
-        data = response.json()
-        if "error" in data:
+        payload = response.json()
+
+        if "error" in payload:
             raise RuntimeError(
-                f"Meta API error: {json.dumps(data['error'], ensure_ascii=False)}"
+                f"Meta API error: {json.dumps(payload['error'], ensure_ascii=False)}"
             )
 
-        batch = data.get("data", [])
+        batch = payload.get("data", [])
         all_rows.extend(batch)
 
-        next_url = data.get("paging", {}).get("next")
+        next_url = payload.get("paging", {}).get("next")
         if not next_url:
             break
 
@@ -467,6 +428,101 @@ def fetch_meta_insights(act_id, token, since, until, time_increment, level, fiel
         params = None
 
     return all_rows
+
+
+def extract_common_metrics(item):
+    actions = item.get("actions", []) or []
+
+    impressions = to_int(item.get("impressions"))
+    link_clicks = to_int(item.get("inline_link_clicks"))
+    amount_spent = round(to_float(item.get("spend")) * 1.25, 2)
+
+    instagram_profile_visits = extract_action_value(
+        actions,
+        [
+            "profile_visit",
+            "instagram_profile_visit",
+            "ig_profile_visit",
+            "profile_visits",
+        ]
+    )
+
+    instagram_follows = extract_action_value(
+        actions,
+        [
+            "follow",
+            "instagram_follow",
+            "ig_follow",
+            "omni_follow",
+            "page_engagement_follow",
+        ]
+    )
+
+    return {
+        "impressions": impressions,
+        "link_clicks": link_clicks,
+        "amount_spent": amount_spent,
+        "instagram_profile_visits": instagram_profile_visits,
+        "instagram_follows": instagram_follows,
+    }
+
+
+def extract_action_value(actions, action_types):
+    if not isinstance(actions, list):
+        return 0
+
+    total = 0.0
+    matched = False
+
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+
+        action_type = str(action.get("action_type", "")).strip()
+        if action_type in action_types:
+            total += to_float(action.get("value"))
+            matched = True
+
+    if matched:
+        return int(total)
+
+    return 0
+
+
+def make_output_row(
+    media,
+    scope,
+    month,
+    day,
+    campaign_name,
+    adset_name,
+    ad_name,
+    gender,
+    age,
+    publisher_platform,
+    impressions,
+    link_clicks,
+    amount_spent,
+    instagram_profile_visits,
+    instagram_follows,
+):
+    return [
+        media,
+        scope,
+        month,
+        day,
+        campaign_name,
+        adset_name,
+        ad_name,
+        gender,
+        age,
+        publisher_platform,
+        impressions,
+        link_clicks,
+        amount_spent,
+        instagram_profile_visits,
+        instagram_follows,
+    ]
 
 
 def connect_spreadsheet(sheet_id, google_creds_dict):
@@ -497,7 +553,7 @@ def write_to_sheet(spreadsheet, sheet_name, rows):
         "ad_name",
         "gender",
         "age",
-        "platform",
+        "publisher_platform",
         "impressions",
         "link_clicks",
         "amount_spent",
@@ -513,7 +569,7 @@ def write_to_sheet(spreadsheet, sheet_name, rows):
 
         worksheet.clear()
         output = header + rows
-        worksheet.update("A1", output)
+        worksheet.update("A1", output, value_input_option="USER_ENTERED")
         print(f"Write success: {sheet_name} ({len(rows)} rows)")
     except Exception as e:
         raise RuntimeError(f"Write error ({sheet_name}): {repr(e)}") from e
@@ -538,22 +594,19 @@ def sort_rows(rows):
         ad_name = row[6]
         gender = row[7]
         age = row[8]
-        platform = row[9]
-
-        day_sort = int(day.replace("-", "")) if day else 0
-        month_sort = int(month.replace("-", "")) if month else 0
+        publisher_platform = row[9]
 
         return (
             media,
             scope_order.get(scope, 999),
-            month_sort,
-            day_sort,
+            month,
+            day,
             campaign_name,
             adset_name,
             ad_name,
             gender,
             age,
-            platform,
+            publisher_platform,
         )
 
     return sorted(rows, key=sort_key)
