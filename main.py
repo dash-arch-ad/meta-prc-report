@@ -10,6 +10,9 @@ META_API_VERSION = "v25.0"
 JST = ZoneInfo("Asia/Tokyo")
 DEFAULT_WORKSHEET_NAME = "gitreport"
 
+# True にすると actions の中身や action_type 一覧を出力
+DEBUG_MODE = True
+
 
 def main():
     print("=== Start Meta Export ===")
@@ -25,12 +28,13 @@ def main():
 
     rows = []
 
-    rows += fetch_campaign_monthly_rows(
+    campaign_rows = fetch_campaign_monthly_rows(
         act_id=resolved["meta"]["account_id"],
         token=resolved["meta"]["token"],
         month_ranges=month_ranges,
     )
-    print(f"campaign rows: {len(rows)}")
+    rows += campaign_rows
+    print(f"campaign rows: {len(campaign_rows)}")
 
     ad_day_rows = fetch_ad_day_rows(
         act_id=resolved["meta"]["account_id"],
@@ -205,7 +209,7 @@ def get_target_date_ranges():
         "until": yesterday,
     })
 
-    # 過去5ヶ月分の月次
+    # 過去5ヶ月
     cursor = current_month_start - timedelta(days=1)
     for _ in range(5):
         month_start = date(cursor.year, cursor.month, 1)
@@ -223,9 +227,7 @@ def get_target_date_ranges():
 
         cursor = month_start - timedelta(days=1)
 
-    # 昇順に並べたいなら reverse、今回は sort 用にそのままでも可
     month_ranges = sorted(month_ranges, key=lambda x: x["since"])
-
     daily_since = month_ranges[0]["since"]
     daily_until = yesterday
 
@@ -261,8 +263,15 @@ def fetch_campaign_monthly_rows(act_id, token, month_ranges):
             time_increment="monthly",
         )
 
+        debug_action_types(
+            items=items,
+            label=f"campaign {month_range['label']}",
+            limit=10,
+        )
+
         for item in items:
             metrics = extract_common_metrics(item)
+
             rows.append(make_output_row(
                 media="meta",
                 scope="campaign",
@@ -306,7 +315,15 @@ def fetch_ad_day_rows(act_id, token, since, until):
         time_increment="1",
     )
 
+    debug_action_types(
+        items=items,
+        label=f"ad_day {since} to {until}",
+        limit=20,
+    )
+
     for item in items:
+        metrics = extract_common_metrics(item)
+
         day = item.get("date_start", "")
         rows.append(make_output_row(
             media="meta",
@@ -319,11 +336,11 @@ def fetch_ad_day_rows(act_id, token, since, until):
             gender="",
             age="",
             publisher_platform="",
-            impressions=extract_common_metrics(item)["impressions"],
-            link_clicks=extract_common_metrics(item)["link_clicks"],
-            amount_spent=extract_common_metrics(item)["amount_spent"],
-            instagram_profile_visits=extract_common_metrics(item)["instagram_profile_visits"],
-            instagram_follows=extract_common_metrics(item)["instagram_follows"],
+            impressions=metrics["impressions"],
+            link_clicks=metrics["link_clicks"],
+            amount_spent=metrics["amount_spent"],
+            instagram_profile_visits=metrics["instagram_profile_visits"],
+            instagram_follows=metrics["instagram_follows"],
         ))
 
     return rows
@@ -350,6 +367,12 @@ def fetch_adset_breakdown_rows(act_id, token, month_ranges, breakdown, scope_nam
             ],
             time_increment="monthly",
             breakdowns=[breakdown],
+        )
+
+        debug_action_types(
+            items=items,
+            label=f"{scope_name} {month_range['label']}",
+            limit=10,
         )
 
         for item in items:
@@ -393,6 +416,7 @@ def fetch_meta_insights(act_id, token, since, until, level, fields, time_increme
         "fields": ",".join(fields),
         "time_increment": time_increment,
         "limit": 5000,
+        "action_breakdowns": "action_type",
     }
 
     if breakdowns:
@@ -437,25 +461,31 @@ def extract_common_metrics(item):
     link_clicks = to_int(item.get("inline_link_clicks"))
     amount_spent = round(to_float(item.get("spend")) * 1.25, 2)
 
-    instagram_profile_visits = extract_action_value(
-        actions,
-        [
-            "profile_visit",
-            "instagram_profile_visit",
-            "ig_profile_visit",
-            "profile_visits",
-        ]
+    profile_visit_candidates = [
+        "profile_visit",
+        "instagram_profile_visit",
+        "ig_profile_visit",
+        "profile_visits",
+    ]
+
+    follow_candidates = [
+        "follow",
+        "instagram_follow",
+        "ig_follow",
+        "omni_follow",
+        "page_engagement_follow",
+    ]
+
+    instagram_profile_visits = extract_action_value_exact(
+        actions=actions,
+        action_types=profile_visit_candidates,
+        metric_name="instagram_profile_visits",
     )
 
-    instagram_follows = extract_action_value(
-        actions,
-        [
-            "follow",
-            "instagram_follow",
-            "ig_follow",
-            "omni_follow",
-            "page_engagement_follow",
-        ]
+    instagram_follows = extract_action_value_exact(
+        actions=actions,
+        action_types=follow_candidates,
+        metric_name="instagram_follows",
     )
 
     return {
@@ -467,26 +497,69 @@ def extract_common_metrics(item):
     }
 
 
-def extract_action_value(actions, action_types):
+def extract_action_value_exact(actions, action_types, metric_name=""):
     if not isinstance(actions, list):
+        if DEBUG_MODE:
+            print(f"[DEBUG] {metric_name}: actions is not list -> 0")
         return 0
 
     total = 0.0
-    matched = False
+    matched = []
 
     for action in actions:
         if not isinstance(action, dict):
             continue
 
         action_type = str(action.get("action_type", "")).strip()
+        value = to_float(action.get("value"))
+
         if action_type in action_types:
-            total += to_float(action.get("value"))
-            matched = True
+            total += value
+            matched.append({"action_type": action_type, "value": value})
 
-    if matched:
-        return int(total)
+    if DEBUG_MODE:
+        if matched:
+            print(f"[DEBUG] {metric_name}: matched -> {json.dumps(matched, ensure_ascii=False)}")
+        else:
+            existing = []
+            for action in actions:
+                if isinstance(action, dict):
+                    existing.append(str(action.get("action_type", "")).strip())
+            existing = sorted(set([x for x in existing if x]))
+            print(f"[DEBUG] {metric_name}: no match")
+            print(f"[DEBUG] {metric_name}: expected one of -> {action_types}")
+            print(f"[DEBUG] {metric_name}: existing action_types -> {existing}")
 
-    return 0
+    return int(total)
+
+
+def debug_action_types(items, label="", limit=10):
+    if not DEBUG_MODE:
+        return
+
+    print(f"==== DEBUG action_types start: {label} ====")
+
+    seen = set()
+
+    for i, item in enumerate(items[:limit], start=1):
+        print(f"---- sample {i} ----")
+        print(f"campaign_name: {item.get('campaign_name', '')}")
+        print(f"adset_name: {item.get('adset_name', '')}")
+        print(f"ad_name: {item.get('ad_name', '')}")
+        print(f"date_start: {item.get('date_start', '')}")
+        print("actions raw:")
+        print(json.dumps(item.get("actions", []), ensure_ascii=False))
+
+        for action in item.get("actions", []) or []:
+            if isinstance(action, dict):
+                action_type = str(action.get("action_type", "")).strip()
+                if action_type:
+                    seen.add(action_type)
+
+    print(f"==== DEBUG action_types unique list: {label} ====")
+    for x in sorted(seen):
+        print(x)
+    print(f"==== DEBUG action_types end: {label} ====")
 
 
 def make_output_row(
@@ -585,28 +658,17 @@ def sort_rows(rows):
     }
 
     def sort_key(row):
-        media = row[0]
-        scope = row[1]
-        month = row[2]
-        day = row[3]
-        campaign_name = row[4]
-        adset_name = row[5]
-        ad_name = row[6]
-        gender = row[7]
-        age = row[8]
-        publisher_platform = row[9]
-
         return (
-            media,
-            scope_order.get(scope, 999),
-            month,
-            day,
-            campaign_name,
-            adset_name,
-            ad_name,
-            gender,
-            age,
-            publisher_platform,
+            row[0],   # media
+            scope_order.get(row[1], 999),
+            row[2],   # month
+            row[3],   # day
+            row[4],   # campaign_name
+            row[5],   # adset_name
+            row[6],   # ad_name
+            row[7],   # gender
+            row[8],   # age
+            row[9],   # publisher_platform
         )
 
     return sorted(rows, key=sort_key)
