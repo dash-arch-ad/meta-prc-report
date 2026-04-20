@@ -10,7 +10,7 @@ META_API_VERSION = "v25.0"
 JST = ZoneInfo("Asia/Tokyo")
 DEFAULT_WORKSHEET_NAME = "gitreport"
 
-# True にすると actions の中身や action_type 一覧を出力
+# デバッグログ
 DEBUG_MODE = True
 
 
@@ -24,7 +24,7 @@ def main():
     validate_config(resolved)
 
     month_ranges, daily_since, daily_until = get_target_date_ranges()
-    print_month_ranges(month_ranges, daily_since, daily_until)
+    print_target_ranges(month_ranges, daily_since, daily_until)
 
     rows = []
 
@@ -195,29 +195,29 @@ def get_target_date_ranges():
     today_jst = datetime.now(JST).date()
     yesterday = today_jst - timedelta(days=1)
 
-    if yesterday < date(today_jst.year, today_jst.month, 1):
-        raise RuntimeError("昨日が存在しないため、月初当日の実行では取得対象がありません。")
-
+    # 当月1日
     current_month_start = date(today_jst.year, today_jst.month, 1)
 
     month_ranges = []
 
     # 当月（1日〜前日）
-    month_ranges.append({
-        "label": current_month_start.strftime("%Y-%m"),
-        "since": current_month_start,
-        "until": yesterday,
-    })
+    if yesterday >= current_month_start:
+        month_ranges.append({
+            "label": current_month_start.strftime("%Y-%m"),
+            "since": current_month_start,
+            "until": yesterday,
+        })
 
-    # 過去5ヶ月
+    # 過去5ヶ月分
     cursor = current_month_start - timedelta(days=1)
     for _ in range(5):
         month_start = date(cursor.year, cursor.month, 1)
-        month_end = date(
-            cursor.year + (1 if cursor.month == 12 else 0),
-            1 if cursor.month == 12 else cursor.month + 1,
-            1
-        ) - timedelta(days=1)
+        next_month_start = (
+            date(cursor.year + 1, 1, 1)
+            if cursor.month == 12
+            else date(cursor.year, cursor.month + 1, 1)
+        )
+        month_end = next_month_start - timedelta(days=1)
 
         month_ranges.append({
             "label": month_start.strftime("%Y-%m"),
@@ -228,13 +228,14 @@ def get_target_date_ranges():
         cursor = month_start - timedelta(days=1)
 
     month_ranges = sorted(month_ranges, key=lambda x: x["since"])
+
     daily_since = month_ranges[0]["since"]
     daily_until = yesterday
 
     return month_ranges, daily_since, daily_until
 
 
-def print_month_ranges(month_ranges, daily_since, daily_until):
+def print_target_ranges(month_ranges, daily_since, daily_until):
     text = ", ".join(
         [f"{r['label']}({r['since']} to {r['until']})" for r in month_ranges]
     )
@@ -258,15 +259,15 @@ def fetch_campaign_monthly_rows(act_id, token, month_ranges):
                 "impressions",
                 "inline_link_clicks",
                 "spend",
-                "actions",
+                "instagram_profile_visits",
             ],
             time_increment="monthly",
         )
 
-        debug_action_types(
+        debug_metric_samples(
             items=items,
             label=f"campaign {month_range['label']}",
-            limit=10,
+            limit=5,
         )
 
         for item in items:
@@ -310,21 +311,21 @@ def fetch_ad_day_rows(act_id, token, since, until):
             "impressions",
             "inline_link_clicks",
             "spend",
-            "actions",
+            "instagram_profile_visits",
         ],
         time_increment="1",
     )
 
-    debug_action_types(
+    debug_metric_samples(
         items=items,
         label=f"ad_day {since} to {until}",
-        limit=20,
+        limit=10,
     )
 
     for item in items:
         metrics = extract_common_metrics(item)
-
         day = item.get("date_start", "")
+
         rows.append(make_output_row(
             media="meta",
             scope="ad_day",
@@ -363,16 +364,16 @@ def fetch_adset_breakdown_rows(act_id, token, month_ranges, breakdown, scope_nam
                 "impressions",
                 "inline_link_clicks",
                 "spend",
-                "actions",
+                "instagram_profile_visits",
             ],
             time_increment="monthly",
             breakdowns=[breakdown],
         )
 
-        debug_action_types(
+        debug_metric_samples(
             items=items,
             label=f"{scope_name} {month_range['label']}",
-            limit=10,
+            limit=5,
         )
 
         for item in items:
@@ -416,7 +417,6 @@ def fetch_meta_insights(act_id, token, since, until, level, fields, time_increme
         "fields": ",".join(fields),
         "time_increment": time_increment,
         "limit": 5000,
-        "action_breakdowns": "action_type",
     }
 
     if breakdowns:
@@ -455,38 +455,13 @@ def fetch_meta_insights(act_id, token, since, until, level, fields, time_increme
 
 
 def extract_common_metrics(item):
-    actions = item.get("actions", []) or []
-
     impressions = to_int(item.get("impressions"))
     link_clicks = to_int(item.get("inline_link_clicks"))
     amount_spent = round(to_float(item.get("spend")) * 1.25, 2)
+    instagram_profile_visits = to_int(item.get("instagram_profile_visits"))
 
-    profile_visit_candidates = [
-        "profile_visit",
-        "instagram_profile_visit",
-        "ig_profile_visit",
-        "profile_visits",
-    ]
-
-    follow_candidates = [
-        "follow",
-        "instagram_follow",
-        "ig_follow",
-        "omni_follow",
-        "page_engagement_follow",
-    ]
-
-    instagram_profile_visits = extract_action_value_exact(
-        actions=actions,
-        action_types=profile_visit_candidates,
-        metric_name="instagram_profile_visits",
-    )
-
-    instagram_follows = extract_action_value_exact(
-        actions=actions,
-        action_types=follow_candidates,
-        metric_name="instagram_follows",
-    )
+    # Ads Insights で安定取得できる公式メトリクスが確認できないため空欄運用
+    instagram_follows = ""
 
     return {
         "impressions": impressions,
@@ -497,69 +472,30 @@ def extract_common_metrics(item):
     }
 
 
-def extract_action_value_exact(actions, action_types, metric_name=""):
-    if not isinstance(actions, list):
-        if DEBUG_MODE:
-            print(f"[DEBUG] {metric_name}: actions is not list -> 0")
-        return 0
-
-    total = 0.0
-    matched = []
-
-    for action in actions:
-        if not isinstance(action, dict):
-            continue
-
-        action_type = str(action.get("action_type", "")).strip()
-        value = to_float(action.get("value"))
-
-        if action_type in action_types:
-            total += value
-            matched.append({"action_type": action_type, "value": value})
-
-    if DEBUG_MODE:
-        if matched:
-            print(f"[DEBUG] {metric_name}: matched -> {json.dumps(matched, ensure_ascii=False)}")
-        else:
-            existing = []
-            for action in actions:
-                if isinstance(action, dict):
-                    existing.append(str(action.get("action_type", "")).strip())
-            existing = sorted(set([x for x in existing if x]))
-            print(f"[DEBUG] {metric_name}: no match")
-            print(f"[DEBUG] {metric_name}: expected one of -> {action_types}")
-            print(f"[DEBUG] {metric_name}: existing action_types -> {existing}")
-
-    return int(total)
-
-
-def debug_action_types(items, label="", limit=10):
+def debug_metric_samples(items, label="", limit=5):
     if not DEBUG_MODE:
         return
 
-    print(f"==== DEBUG action_types start: {label} ====")
-
-    seen = set()
+    print(f"==== DEBUG metrics start: {label} ====")
 
     for i, item in enumerate(items[:limit], start=1):
         print(f"---- sample {i} ----")
-        print(f"campaign_name: {item.get('campaign_name', '')}")
-        print(f"adset_name: {item.get('adset_name', '')}")
-        print(f"ad_name: {item.get('ad_name', '')}")
-        print(f"date_start: {item.get('date_start', '')}")
-        print("actions raw:")
-        print(json.dumps(item.get("actions", []), ensure_ascii=False))
+        print(json.dumps({
+            "campaign_name": item.get("campaign_name", ""),
+            "adset_name": item.get("adset_name", ""),
+            "ad_name": item.get("ad_name", ""),
+            "date_start": item.get("date_start", ""),
+            "date_stop": item.get("date_stop", ""),
+            "gender": item.get("gender", ""),
+            "age": item.get("age", ""),
+            "publisher_platform": item.get("publisher_platform", ""),
+            "impressions": item.get("impressions"),
+            "inline_link_clicks": item.get("inline_link_clicks"),
+            "spend": item.get("spend"),
+            "instagram_profile_visits": item.get("instagram_profile_visits"),
+        }, ensure_ascii=False))
 
-        for action in item.get("actions", []) or []:
-            if isinstance(action, dict):
-                action_type = str(action.get("action_type", "")).strip()
-                if action_type:
-                    seen.add(action_type)
-
-    print(f"==== DEBUG action_types unique list: {label} ====")
-    for x in sorted(seen):
-        print(x)
-    print(f"==== DEBUG action_types end: {label} ====")
+    print(f"==== DEBUG metrics end: {label} ====")
 
 
 def make_output_row(
