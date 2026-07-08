@@ -2,6 +2,8 @@ import os
 import json
 import requests
 import gspread
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from oauth2client.service_account import ServiceAccountCredentials
 
 
@@ -10,6 +12,17 @@ def load_config():
     if not secret:
         raise ValueError("APP_SECRET_JSON が設定されていません。")
     return json.loads(secret)
+
+
+def get_date_range_this_month_exclude_today():
+    today_jst = datetime.now(ZoneInfo("Asia/Tokyo")).date()
+    first_day = today_jst.replace(day=1)
+    yesterday = today_jst - timedelta(days=1)
+
+    if yesterday < first_day:
+        raise ValueError("月初1日は『今月（今日を含まない）』の対象期間が存在しません。")
+
+    return first_day.strftime("%Y-%m-%d"), yesterday.strftime("%Y-%m-%d")
 
 
 def get_instagram_follows(actions):
@@ -34,12 +47,19 @@ def fetch_meta_insights(config):
     if not account_id.startswith("act_"):
         account_id = f"act_{account_id}"
 
+    since, until = get_date_range_this_month_exclude_today()
+
+    print(f"取得期間: {since} ～ {until}")
+
     url = f"https://graph.facebook.com/v25.0/{account_id}/insights"
 
     params = {
         "access_token": access_token,
         "level": "ad",
-        "date_preset": "this_month",
+        "time_range": json.dumps({
+            "since": since,
+            "until": until
+        }),
         "fields": ",".join([
             "date_start",
             "date_stop",
