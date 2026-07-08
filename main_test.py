@@ -9,7 +9,6 @@ def load_config():
     secret = os.environ.get("APP_SECRET_JSON")
     if not secret:
         raise ValueError("APP_SECRET_JSON が設定されていません。")
-
     return json.loads(secret)
 
 
@@ -29,7 +28,7 @@ def get_instagram_follows(actions):
 def fetch_meta_insights(config):
     meta = config["meta"]
 
-    access_token = meta["access_token"]
+    access_token = meta["token"]
     ad_account_id = meta["ad_account_id"]
 
     url = f"https://graph.facebook.com/v25.0/{ad_account_id}/insights"
