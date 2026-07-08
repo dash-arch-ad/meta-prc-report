@@ -29,7 +29,10 @@ def fetch_meta_insights(config):
     meta = config["meta"]
 
     access_token = meta["token"]
-    ad_account_id = meta["account_id"]
+    account_id = meta["account_id"]
+
+    if not account_id.startswith("act_"):
+        account_id = f"act_{account_id}"
 
     url = f"https://graph.facebook.com/v25.0/{account_id}/insights"
 
