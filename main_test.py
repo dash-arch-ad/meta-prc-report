@@ -39,7 +39,7 @@ def fetch_meta_insights(config):
     params = {
         "access_token": access_token,
         "level": "ad",
-        "date_preset": "yesterday",
+        "date_preset": "this_month",
         "fields": ",".join([
             "date_start",
             "date_stop",
