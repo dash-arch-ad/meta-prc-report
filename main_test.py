@@ -29,9 +29,9 @@ def fetch_meta_insights(config):
     meta = config["meta"]
 
     access_token = meta["token"]
-    ad_account_id = meta["ad_account_id"]
+    ad_account_id = meta["account_id"]
 
-    url = f"https://graph.facebook.com/v25.0/{ad_account_id}/insights"
+    url = f"https://graph.facebook.com/v25.0/{account_id}/insights"
 
     params = {
         "access_token": access_token,
