@@ -2,7 +2,7 @@ import os
 import json
 import requests
 import gspread
-from google.oauth2.service_account import Credentials
+from oauth2client.service_account import ServiceAccountCredentials
 
 
 def load_config():
@@ -56,6 +56,11 @@ def fetch_meta_insights(config):
 
     while url:
         response = requests.get(url, params=params)
+
+        if response.status_code != 200:
+            print("Meta API Error:")
+            print(response.text)
+
         response.raise_for_status()
         data = response.json()
 
@@ -79,9 +84,10 @@ def write_to_sheet(config, rows):
     ]
 
     credentials_info = config["gcp_service_account"]
-    credentials = Credentials.from_service_account_info(
+
+    credentials = ServiceAccountCredentials.from_json_keyfile_dict(
         credentials_info,
-        scopes=scopes
+        scopes
     )
 
     gc = gspread.authorize(credentials)
