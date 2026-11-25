@@ -251,6 +251,7 @@ def fetch_campaign_monthly_rows(act_id, token, month_ranges):
                 "inline_link_clicks",
                 "spend",
                 "instagram_profile_visits",
+                "instagram_profile_follow",
             ],
             time_increment="monthly",
         )
@@ -273,7 +274,7 @@ def fetch_campaign_monthly_rows(act_id, token, month_ranges):
                 link_clicks=metrics["link_clicks"],
                 amount_spent=metrics["amount_spent"],
                 instagram_profile_visits=metrics["instagram_profile_visits"],
-                instagram_follows=metrics["instagram_follows"],
+                instagram_profile_follow=metrics["instagram_profile_follow"],
             ))
 
     return rows
@@ -297,6 +298,7 @@ def fetch_ad_day_rows(act_id, token, since, until):
             "inline_link_clicks",
             "spend",
             "instagram_profile_visits",
+            "instagram_profile_follow",
         ],
         time_increment="1",
     )
@@ -320,7 +322,7 @@ def fetch_ad_day_rows(act_id, token, since, until):
             link_clicks=metrics["link_clicks"],
             amount_spent=metrics["amount_spent"],
             instagram_profile_visits=metrics["instagram_profile_visits"],
-            instagram_follows=metrics["instagram_follows"],
+            instagram_profile_follow=metrics["instagram_profile_follow"],
         ))
 
     return rows
@@ -344,6 +346,7 @@ def fetch_adset_breakdown_rows(act_id, token, month_ranges, breakdown, scope_nam
                 "inline_link_clicks",
                 "spend",
                 "instagram_profile_visits",
+                "instagram_profile_follow",
             ],
             time_increment="monthly",
             breakdowns=[breakdown],
@@ -371,7 +374,7 @@ def fetch_adset_breakdown_rows(act_id, token, month_ranges, breakdown, scope_nam
                 link_clicks=metrics["link_clicks"],
                 amount_spent=metrics["amount_spent"],
                 instagram_profile_visits=metrics["instagram_profile_visits"],
-                instagram_follows=metrics["instagram_follows"],
+                instagram_profile_follow=metrics["instagram_profile_follow"],
             ))
 
     return rows
@@ -416,7 +419,7 @@ def validate_meta_row(row, fields, breakdowns, since, until, daily):
         if not valid_count(row.get(field)):
             raise ExportError("Meta returned an invalid delivery metric.")
     # Meta may omit events with no activity. Keep the original zero on omission.
-    for field in ("inline_link_clicks", "instagram_profile_visits"):
+    for field in ("inline_link_clicks", "instagram_profile_visits", "instagram_profile_follow"):
         if field in row and not valid_count(row[field]):
             raise ExportError("Meta returned an invalid event metric.")
     for field in (*fields, *breakdowns):
@@ -491,15 +494,14 @@ def extract_common_metrics(item):
     amount_spent = round(to_float(item.get("spend")) * 1.25, 2)
     instagram_profile_visits = to_int(item.get("instagram_profile_visits"))
 
-    # Ads Insights で安定取得できる公式メトリクスが確認できないため空欄運用
-    instagram_follows = ""
+    instagram_profile_follow = to_int(item.get("instagram_profile_follow"))
 
     return {
         "impressions": impressions,
         "link_clicks": link_clicks,
         "amount_spent": amount_spent,
         "instagram_profile_visits": instagram_profile_visits,
-        "instagram_follows": instagram_follows,
+        "instagram_profile_follow": instagram_profile_follow,
     }
 
 
@@ -518,7 +520,7 @@ def make_output_row(
     link_clicks,
     amount_spent,
     instagram_profile_visits,
-    instagram_follows,
+    instagram_profile_follow,
 ):
     return [
         media,
@@ -535,7 +537,7 @@ def make_output_row(
         link_clicks,
         amount_spent,
         instagram_profile_visits,
-        instagram_follows,
+        instagram_profile_follow,
     ]
 
 
@@ -559,7 +561,7 @@ def connect_spreadsheet(sheet_id, google_creds_dict):
 HEADER = [
     'media', 'scope', 'month', 'day', 'campaign_name', 'adset_name', 'ad_name',
     'gender', 'age', 'publisher_platform', 'impressions', 'link_clicks',
-    'amount_spent', 'instagram_profile_visits', 'instagram_follows',
+    'amount_spent', 'instagram_profile_visits', 'instagram_profile_follow',
 ]
 
 
@@ -653,7 +655,7 @@ def previous_report_height(book, title, new_height):
     result = book.values_get(f"'{escaped}'!A:O", params={"valueRenderOption": "FORMULA"})
     values = result.get("values", [])
     height = 0
-    if values and values[0] == HEADER:
+    if values and values[0] in (HEADER, [*HEADER[:-1], "instagram_follows"]):
         height = 1
         for row in values[1:]:
             if len(row) < 3 or row[0] != "meta":
