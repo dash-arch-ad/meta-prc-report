@@ -57,7 +57,7 @@ def collect_rows(resolved):
     campaign_rows = fetch_campaign_monthly_rows(
         act_id=resolved["meta"]["account_id"],
         token=resolved["meta"]["token"],
-        month_ranges=month_ranges,
+        until=daily_until,
     )
     rows += campaign_rows
     print(f"campaign rows: {len(campaign_rows)}")
@@ -199,9 +199,9 @@ def get_target_date_ranges():
             "until": yesterday,
         })
 
-    # 過去5ヶ月分
+    # 過去2ヶ月分
     cursor = current_month_start - timedelta(days=1)
-    for _ in range(5):
+    for _ in range(2):
         month_start = date(cursor.year, cursor.month, 1)
         next_month_start = (
             date(cursor.year + 1, 1, 1)
@@ -234,49 +234,60 @@ def print_target_ranges(month_ranges, daily_since, daily_until):
     print(f"Target daily range: {daily_since} to {daily_until}")
 
 
-def fetch_campaign_monthly_rows(act_id, token, month_ranges):
-    rows = []
+def campaign_group_name(name):
+    match = re.search(r"(?:【(旅マエ|旅ナカ)】|(旅マエ|旅ナカ)_)([^_]+)(?:_|$)", name)
+    if not match:
+        raise ExportError("Campaign name does not match the grouping rules.")
+    store = match.group(3).strip()
+    if not store:
+        raise ExportError("Campaign store name is missing.")
+    return f"{match.group(1) or match.group(2)}_{store}"
+
+
+def fetch_campaign_monthly_rows(act_id, token, until):
+    since = date(2026, 4, 1)
+    if until < since:
+        return []
     normalized_act_id = normalize_meta_act_id(act_id)
+    items = fetch_meta_insights(
+        act_id=normalized_act_id,
+        token=token,
+        since=since,
+        until=until,
+        level="campaign",
+        fields=[
+            "campaign_name",
+            "impressions",
+            "inline_link_clicks",
+            "spend",
+            "instagram_profile_visits",
+            "instagram_profile_follow",
+        ],
+        time_increment="monthly",
+    )
+    groups = {}
+    for item in items:
+        try:
+            day = date.fromisoformat(item["date_start"])
+        except (KeyError, TypeError, ValueError):
+            raise ExportError("Meta returned an invalid date.") from None
+        group = campaign_group_name(item["campaign_name"])
+        key = (day.strftime("%Y-%m"), group)
+        metrics = extract_common_metrics(item)
+        if key not in groups:
+            groups[key] = metrics
+        else:
+            for metric, value in metrics.items():
+                groups[key][metric] += value
 
-    for month_range in month_ranges:
-        items = fetch_meta_insights(
-            act_id=normalized_act_id,
-            token=token,
-            since=month_range["since"],
-            until=month_range["until"],
-            level="campaign",
-            fields=[
-                "campaign_name",
-                "impressions",
-                "inline_link_clicks",
-                "spend",
-                "instagram_profile_visits",
-                "instagram_profile_follow",
-            ],
-            time_increment="monthly",
-        )
-
-        for item in items:
-            metrics = extract_common_metrics(item)
-
-            rows.append(make_output_row(
-                media="meta",
-                scope="campaign",
-                month=month_range["label"],
-                day="",
-                campaign_name=item.get("campaign_name", ""),
-                adset_name="",
-                ad_name="",
-                gender="",
-                age="",
-                publisher_platform="",
-                impressions=metrics["impressions"],
-                link_clicks=metrics["link_clicks"],
-                amount_spent=metrics["amount_spent"],
-                instagram_profile_visits=metrics["instagram_profile_visits"],
-                instagram_profile_follow=metrics["instagram_profile_follow"],
-            ))
-
+    rows = []
+    for (month, group), metrics in groups.items():
+        metrics["amount_spent"] = round(metrics["amount_spent"], 2)
+        rows.append(make_output_row(
+            media="meta", scope="campaign", month=month, day="",
+            campaign_name=group, adset_name="", ad_name="", gender="",
+            age="", publisher_platform="", **metrics,
+        ))
     return rows
 
 
@@ -289,11 +300,9 @@ def fetch_ad_day_rows(act_id, token, since, until):
         token=token,
         since=since,
         until=until,
-        level="ad",
+        level="campaign",
         fields=[
             "campaign_name",
-            "adset_name",
-            "ad_name",
             "impressions",
             "inline_link_clicks",
             "spend",
@@ -313,8 +322,8 @@ def fetch_ad_day_rows(act_id, token, since, until):
             month=to_month(day),
             day=day,
             campaign_name=item.get("campaign_name", ""),
-            adset_name=item.get("adset_name", ""),
-            ad_name=item.get("ad_name", ""),
+            adset_name="",
+            ad_name="",
             gender="",
             age="",
             publisher_platform="",
@@ -458,15 +467,18 @@ def next_cursor(data, endpoint):
     return after[0]
 
 
-def fetch_meta_insights(act_id, token, since, until, level, fields, time_increment, breakdowns=None):
+def fetch_meta_insights(act_id, token, since, until, level, fields, time_increment, breakdowns=None, date_preset=None):
     url = f"https://graph.facebook.com/{META_API_VERSION}/{act_id}/insights"
     params = {
         "level": level,
-        "time_range": json.dumps({"since": since.isoformat(), "until": until.isoformat()}),
         "fields": ",".join(fields),
         "time_increment": time_increment,
         "limit": 5000,
     }
+    if date_preset:
+        params["date_preset"] = date_preset
+    else:
+        params["time_range"] = json.dumps({"since": since.isoformat(), "until": until.isoformat()})
     if breakdowns:
         params["breakdowns"] = ",".join(breakdowns)
     headers = {"Authorization": f"Bearer {token}"}
